@@ -100,10 +100,15 @@ J2CyclicBoundingSurface::J2CyclicBoundingSurface(int  tag,
         double beta)
 :
 NDMaterial(tag, ND_TAG_J2CyclicBoundingSurface),
-m_sigma0_n(6), m_sigma0_np1(6), m_kappa_n(0), m_xi_n(0), m_stress_n(6), m_stress_np1(6), m_strain_np1(6), m_strain_n(6), m_Ktan_np1(6,6), m_Kelas(6,6)
+m_sigma0_n(6), m_sigma0_np1(6),  m_stress_n(6), m_stress_np1(6), m_strain_np1(6), m_strain_n(6), m_Ktan_np1(6,6), m_Kelas(6,6)
 {
   m_young = 9.*K*G/(3.*K+G);
   m_poiss = (3.*K-2.*G)/2./ (3. * K + G);
+  //opserr << m_poiss << endln;
+  if (m_poiss > 0.5) {
+	  opserr << "\n ERROR! J2CyclicBoundingSurface Poiss can not be grater than 0.50!" << endln;
+	  return;
+  }
   m_su    = su;
   m_bulk  = K ; // E / 3 / (1-2*nu)
   m_shear = G;  // E / 2 / (1 + nu);
@@ -112,8 +117,13 @@ m_sigma0_n(6), m_sigma0_np1(6), m_kappa_n(0), m_xi_n(0), m_stress_n(6), m_stress
   m_kappa_inf   = k_in;
   m_h_par = h;
   m_m_par = m;
-  m_beta = beta;
+  m_beta  = beta;
+  m_kappa_n = m_kappa_inf;
+  m_xi_n = 2.*m_shear;
 
+  m_isElast2Plast = false;
+
+  doInitialTangent();
 
  /* plastic_integrator();*/
 }
@@ -135,117 +145,159 @@ void J2CyclicBoundingSurface::integrate()
 	// Force elastic response
 	if (m_ElastFlag == 0) {
 		elastic_integrator();
+		//opserr << "elastic" << endln;
 	}
 	// ElastoPlastic response
 	else {
 		J2CyclicBoundingSurface::plastic_integrator();
+		//opserr << "plastic" << endln;
 	}
 }
 
 void J2CyclicBoundingSurface::elastic_integrator()
 {
-	for (int i = 0; i < 5; i++)
-		for (int j = 0; j < 5; j++)
-            m_stress_np1(i) = m_Kelas(i,j)*m_strain_np1(j);
-	
+    Vector delta_strain = m_strain_np1 - m_strain_n; //delta strain for the step
+	m_stress_np1 = m_stress_n + m_Kelas * delta_strain;
 	
 }
 
 
-//plasticity integration routine
+//plastic integration routine
 void J2CyclicBoundingSurface :: plastic_integrator( )
 {
-  const double tol_rel = (1.0e-5) ;
+  const double tol_rel = (1.0e-6) ;
 
-  Vector dev_delta_strain_np1(6) ; //deviatoric strain
+  Vector dev_delta_strain_np1(6) ;                 //deviatoric strain
+  Vector delta_strain = m_strain_np1 - m_strain_n; //delta strain for the step
+
+  //opserr << "delta_strain = " << delta_strain << endln;
+
+  double vol_strain   = trace(delta_strain) ;
 
   Vector dev_stress_n(6)  ; //deviatoric stress
   Vector dev_stress_np1(6); //deviatoric stress
   Vector dev_sigma0_np1(6); //deviatoric stress
 
-  Vector delta_strain = m_strain_np1 - m_strain_n; //delta strain for the step
-
-  double vol_strain = trace(delta_strain) ;
+  double H_n ;
+  double H_np1;
   // 
-  // inicia variables
+  // initialize variables
    
-  if (m_kappa_n == 0) {
-	  m_kappa_n = m_kappa_inf;
-  }
-
-  m_kappa_np1  = m_kappa_n;
-  m_xi_np1     = 2. * m_shear;
   m_sigma0_np1 = m_sigma0_n;
   //   
   dev_delta_strain_np1 = dev_strain_op(delta_strain);
-  dev_stress_n         = dev_stress_op(m_stress_np1);
+  dev_stress_n         = dev_stress_op(m_stress_n);
   dev_sigma0_np1       = dev_stress_op(m_sigma0_np1);
-
+  
   double cond = -1;
   double norm_dev_stress_n   = sqrt(inner_product(dev_stress_n, dev_stress_n));
   double norm_dev_sigma0_np1 = sqrt(inner_product(dev_sigma0_np1, dev_sigma0_np1));
   Vector auxVec1;
-
-  // check loading/unloading
-  if (norm_dev_stress_n > 0 || norm_dev_sigma0_np1 > 0)
-  {
-	  auxVec1 = (-(1 + m_kappa_n)*dev_stress_n - m_kappa_n*(1 + m_kappa_n)*(dev_stress_n - dev_sigma0_np1)) / 
-	      (
-		  inner_product(dev_stress_n, (dev_stress_n - dev_sigma0_np1)) + m_kappa_n*inner_product((dev_stress_n - dev_sigma0_np1), (dev_stress_n - dev_sigma0_np1))
-		  );
-      cond = inner_product(auxVec1, dev_delta_strain_np1);
-	  if (cond > 0.)
+  //****************************************
+  // Condition over kappa
+  if (m_isElast2Plast) {
+	  //m_kappa_n = m_kappa_inf;
+	  m_kappa_n = abs(m_R / norm_dev_stress_n - 1.0);
+	  H_n       = H(m_kappa_n);
+	  m_xi_n    = 2.0*m_shear * H_n / (H_n + 3.0*m_shear);
+	  m_kappa_np1 = m_kappa_n;
+	  m_xi_np1    = m_xi_n;
+	  m_isElast2Plast = false;
+  }
+  else {
+	  // Esta condicion no estoy seguro este bien
+	  //if (m_kappa_n == 0.0) {
+		 // m_kappa_n = m_kappa_inf;
+	  //}
+	  //if (m_xi_n == 0.0) {
+		 // m_xi_n = 2. * m_shear;
+	  //}
+	  m_kappa_np1 = m_kappa_n;
+	  m_xi_np1 = m_xi_n;
+	  //m_xi_np1 = 2. * m_shear;
+	  //****************************************
+	  // check loading/unloading
+	  if (norm_dev_stress_n > 0 || norm_dev_sigma0_np1 > 0)
 	  {
-		  m_sigma0_np1   = m_stress_n;
-		  m_kappa_n      = m_kappa_inf;
-		  m_kappa_np1    = m_kappa_n;
-		  dev_sigma0_np1 = dev_stress_op(m_sigma0_np1);
-      }
+		  auxVec1 = (-(1 + m_kappa_n)*dev_stress_n - m_kappa_n*(1 + m_kappa_n)*(dev_stress_n - dev_sigma0_np1)) /
+			  (
+				  inner_product(dev_stress_n, (dev_stress_n - dev_sigma0_np1)) + m_kappa_n*inner_product((dev_stress_n - dev_sigma0_np1), (dev_stress_n - dev_sigma0_np1))
+				  );
+		  cond = inner_product(auxVec1, dev_delta_strain_np1);
+		  if (cond > 0.)
+		  {
+			  m_sigma0_np1 = m_stress_n;
+			  m_kappa_n    = m_kappa_inf;
+			  m_kappa_np1  = m_kappa_n;
+			  H_n          = H(m_kappa_n);
+			  m_xi_np1     = 2. * m_shear;
+			  dev_sigma0_np1 = dev_stress_op(m_sigma0_np1);
+		  }
+	  }
   }
   // 
   // Newton for the material, solve for n_xi_np1 and n_kappa_np1
   // 
 
   //  Initial Residual 
-  double H_n   = H(m_kappa_n);
-  double H_np1 = H(m_kappa_np1);
+  H_n   = H(m_kappa_n);
+  H_np1 = H(m_kappa_np1);
 
   Vector auxVec2 = dev_stress_n + m_xi_np1 * dev_delta_strain_np1 + m_kappa_np1 * (dev_stress_n + m_xi_np1*dev_delta_strain_np1 - dev_sigma0_np1);
   double auxVec2_norm = vector_norm(auxVec2);
 
   Vector res(2); double res_norm;
-  res(0) = m_xi_np1 + 3. * m_shear * m_xi_np1 * ((1. - m_beta) / H_n + m_beta / H_np1) - 2. * m_shear;
-  res(1) = auxVec2_norm - m_R;
+  //res(0) = m_xi_np1 + 3. * m_shear * m_xi_np1 * ((1. - m_beta) / H_n + m_beta / H_np1) - 2. * m_shear;
+  //res(1) = auxVec2_norm - m_R;
+
+  res(0) = m_xi_np1/2./ m_shear + 3./2. * m_xi_np1 * ((1. - m_beta) / H_n + m_beta / H_np1) - 1.0;
+  res(1) = auxVec2_norm/ m_R - 1.0;
+
   res_norm = vector_norm(res);
-
-
+  
   // Initialize variables for the Newton
   int iteration_counter = 0;
-  const int max_iterations = 200;
+  const int max_iterations = 1000;
   Matrix Ktan(2,2);
 
   Vector incVar(2);
   double tol_material = tol_rel*res_norm;
+  double constNew = 1.0;
+
   // Main while in the Newton loop
-  while (res_norm>tol_material &&  iteration_counter<max_iterations && auxVec2_norm>1e-10)
+  while (res_norm>(tol_material+1.e-10) &&  iteration_counter<max_iterations && auxVec2_norm>1e-10)
   {
 	  iteration_counter ++ ;
-	  Ktan(0, 0) = 1. + 3. * m_shear * ((1. - m_beta) / H_n + m_beta / H_np1);
-	  Ktan(0, 1) = 3. * m_shear*m_xi_np1*(-m_beta / pow(H_np1, 2) * m_m_par*m_h_par*pow(m_kappa_np1, (m_m_par - 1.)));
-	  Ktan(1, 0) = inner_product(auxVec2, (dev_delta_strain_np1 + m_kappa_np1*dev_delta_strain_np1)) / auxVec2_norm; //vector_norm(auxVec2)
-	  Ktan(1, 1) = inner_product(auxVec2, (dev_stress_n   + m_xi_np1   *dev_delta_strain_np1-dev_sigma0_np1)) / auxVec2_norm; //vector_norm(auxVec2)
-	  //
+	  //Ktan(0, 0) = 1. + 3. * m_shear * ((1. - m_beta) / H_n + m_beta / H_np1);
+	  //Ktan(0, 1) = 3. * m_shear*m_xi_np1*(-m_beta / pow(H_np1, 2) * m_m_par*m_h_par*pow(m_kappa_np1, (m_m_par - 1.)));
+	  //Ktan(1, 0) = inner_product(auxVec2, (dev_delta_strain_np1 + m_kappa_np1*dev_delta_strain_np1)) / auxVec2_norm; //vector_norm(auxVec2)
+	  //Ktan(1, 1) = inner_product(auxVec2, (dev_stress_n   + m_xi_np1   *dev_delta_strain_np1-dev_sigma0_np1)) / auxVec2_norm; //vector_norm(auxVec2)
 
+	  Ktan(0, 0) = 1./2./ m_shear + 3./2. * ((1. - m_beta) / H_n + m_beta / H_np1);
+	  Ktan(0, 1) = 3./2. * m_xi_np1*(-m_beta / pow(H_np1, 2) * m_m_par*m_h_par*pow(m_kappa_np1, (m_m_par - 1.)));
+	  Ktan(1, 0) = inner_product(auxVec2, (dev_delta_strain_np1 + m_kappa_np1*dev_delta_strain_np1)) / auxVec2_norm / m_R; //vector_norm(auxVec2)
+	  Ktan(1, 1) = inner_product(auxVec2, (dev_stress_n + m_xi_np1   *dev_delta_strain_np1 - dev_sigma0_np1)) / auxVec2_norm / m_R; //vector_norm(auxVec2)
+	  //opserr << "res = " << res << endln;
+	  //opserr << "Ktan = " << Ktan << endln;
+	  //
 	  // Solve the system
 	  Ktan.Solve(res, incVar);
-	  incVar = -1 * incVar;
+	  if ((m_xi_np1<constNew*incVar(0)) || (m_kappa_np1<constNew*incVar(1)) ) {
+		  constNew = constNew / 2.0;
+	  }
 	  // Actualize variable
+	  incVar = -constNew * incVar;
+	  //opserr << "incVar = " << incVar << endln;
 	  m_xi_np1    = m_xi_np1    + incVar(0);
 	  m_kappa_np1 = m_kappa_np1 + incVar(1);
-	  // m_xi_np1 should be less than 2*shear,
-	  if (m_xi_np1>2*m_shear) { m_xi_np1 = 2 * m_shear; }
+
+	  // m_xi_np1 should be greater than 0, puts a value 10% of the maximun
+	  // if (m_xi_np1<=0) { m_xi_np1 = 0.1 * 2. * m_shear; }	 
+	  // m_xi_np1 should be less than 2*shear, puts the maximun value
+	  // if (m_xi_np1>2*m_shear) { m_xi_np1 = 2. * m_shear; }
 	  // kappa should be possitive
-	  if (m_kappa_np1<0){ m_kappa_np1 = 1e-5;}
+	  // if (m_kappa_np1<0){ m_kappa_np1 = 1.0e-5;}
+
 	  // Actualize hardening
 	  H_np1 = H(m_kappa_np1);
 	  // Calcule sigma_np1
@@ -261,8 +313,12 @@ void J2CyclicBoundingSurface :: plastic_integrator( )
 	  auxVec2 = dev_stress_n + m_xi_np1 * dev_delta_strain_np1 + m_kappa_np1 * (dev_stress_n + m_xi_np1*dev_delta_strain_np1 - dev_sigma0_np1);
 	  auxVec2_norm = vector_norm(auxVec2);
 
-	  res(0) = m_xi_np1 + 3. * m_shear*m_xi_np1*((1. - m_beta) / H_n + m_beta / H_np1) - 2. * m_shear;
-	  res(1) = auxVec2_norm - m_R;
+	  //res(0) = m_xi_np1 + 3. * m_shear*m_xi_np1*((1. - m_beta) / H_n + m_beta / H_np1) - 2. * m_shear;
+	  //res(1) = auxVec2_norm - m_R;
+
+	  res(0) = m_xi_np1 / 2. / m_shear + 3. / 2. * m_xi_np1 * ((1. - m_beta) / H_n + m_beta / H_np1) - 1.0;
+	  res(1) = auxVec2_norm / m_R - 1.0;
+
 	  res_norm = vector_norm(res);
 	   
   }
@@ -335,7 +391,8 @@ J2CyclicBoundingSurface :: doInitialTangent( )
 	I4dev = eye - 1 / 3 * I2xI2;
 
 	m_Kelas = m_bulk*I2xI2 + 2*m_shear*I4dev;
-
+	//opserr << "m_Kelas :" << m_Kelas << endln;
+	
 	return;
 
 } 
@@ -345,7 +402,7 @@ J2CyclicBoundingSurface :: doInitialTangent( )
 double J2CyclicBoundingSurface :: H( double kappa ) 
 {
 //  H(kappa) = h*kappa^m
-	return    m_h_par* pow(kappa, m_m_par);
+	return    m_h_par*pow(kappa, m_m_par);
 }
 
 
@@ -399,7 +456,7 @@ J2CyclicBoundingSurface::commitState( )
 	m_sigma0_n = m_sigma0_np1;
 	m_stress_n = m_stress_np1;
 	m_kappa_n  = m_kappa_np1;
-	m_xi_n = m_xi_np1;
+	m_xi_n     = m_xi_np1;
 	// Actualize m_strain_n
 	m_strain_n = m_strain_np1; //Guarda m_strain_n para calcular el delta_strain del proximo paso
 
@@ -440,47 +497,28 @@ J2CyclicBoundingSurface::setParameter(const char **argv, int argc,
 			return param.addObject(1, this);
 		}
 		else if (strcmp(argv[0], "materialState") == 0) {     // enforce elastic/elastoplastic response
-			return param.addObject(5, this);
+			return param.addObject(2, this);
 		}
 	}
-
-  if (strcmp(argv[0],"K") == 0)
-    return param.addObject(1, this);
-  
-  else if (strcmp(argv[0],"G") == 0 || strcmp(argv[0],"mu") == 0)
-    return param.addObject(2, this);
-  
-  else if (strcmp(argv[0],"rho") == 0)
-    return param.addObject(3, this);
-
-  return -1;
+	return -1;
 }
 
 int 
-J2CyclicBoundingSurface::updateParameter(int responseID, int parameterID, Information &info)
+J2CyclicBoundingSurface::updateParameter(int responseID, Information &info)
 { 
 	// called updateMaterialStage in tcl file
 	if (responseID == 1) {
 		m_ElastFlag = info.theInt;
+		m_isElast2Plast = true;
+		return 0;
 	}
 	// called materialState in tcl file
-	else if (responseID == 5) {
+	else if (responseID == 2) {
 		m_ElastFlag = (int)info.theDouble;
+		m_isElast2Plast = true;
+		return 0;
 	}
-
-  switch(parameterID) {
-  case 1:
-    m_bulk = info.theDouble;
-    return 0;
-  case 2:
-    m_shear = info.theDouble;
-    return 0;
-  case 3:
-    m_density = info.theDouble;
-    return 0;
-  default:
-    return -1;
-  }
+	return -1;
 }
 
 int
@@ -598,7 +636,14 @@ J2CyclicBoundingSurface::getStress()
 const Matrix&
 J2CyclicBoundingSurface::getTangent()
 {
-	// only the symetric part
+	// Force elastic response
+	if (m_ElastFlag == 0) {
+		return	m_Kelas;
+
+	}
+	// ElastoPlastic response
+	else {
+		// only the symetric part
 	Matrix I2xI2(6, 6), I4dev(6, 6), eye(6,6);
 	for (unsigned int i = 0; i < 3; i++)
 		for (unsigned int j = 0; j < 3; j++)
@@ -612,9 +657,15 @@ J2CyclicBoundingSurface::getTangent()
 		}
 	I4dev = eye - 1 / 3 * I2xI2;
 
-	m_Ktan_np1 = m_bulk*I2xI2 + m_xi_np1*I4dev ;
+	//m_Ktan_np1 = m_bulk*I2xI2 + m_xi_np1*I4dev ; //which?
+	m_Ktan_n   = m_bulk*I2xI2 + m_xi_n*I4dev;
 
-	return m_Ktan_np1;
+	//return m_Ktan_np1;
+	//return m_Ktan_n;
+	return m_Kelas;
+	}
+
+	
 }
 
 // send back the tangent 
