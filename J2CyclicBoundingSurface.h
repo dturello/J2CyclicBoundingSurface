@@ -91,7 +91,7 @@ class J2CyclicBoundingSurface : public NDMaterial {
 
 
   virtual int setParameter(const char **argv, int argc, Parameter &param);
-  virtual int updateParameter(int responseID, int parameterID, Information &info);
+  virtual int updateParameter(int responseID, Information &info);
   virtual int activateParameter(int paramID);
 
   virtual int setTrialStrain(const Vector &strain_from_element);
@@ -139,6 +139,7 @@ class J2CyclicBoundingSurface : public NDMaterial {
   Vector m_stress_n  ;             //stress vector time n
   Vector m_stress_np1;             //stress vector time n+1
   Matrix m_Ktan_np1;
+  Matrix m_Ktan_n;
   Matrix m_Kelas; 
 
   //material input
@@ -173,6 +174,8 @@ class J2CyclicBoundingSurface : public NDMaterial {
   double rho;
   
   int parameterID;
+
+  bool m_isElast2Plast;
 
 } ; //end of J2CyclicBoundingSurface declarations
 
